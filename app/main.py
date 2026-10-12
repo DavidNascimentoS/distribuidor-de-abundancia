@@ -8,7 +8,7 @@ Env vars:
   WA_PHONE_NUMBER_ID  ID of the WhatsApp number (WhatsApp > API Setup)
   WA_API_VERSION      Graph API version, e.g. "v23.0" — check the current one in Meta docs
 
-Run locally:  uvicorn main:app --reload --port 8000
+Run locally:  uvicorn app.main:app --reload --port 8000
 Expose HTTPS: cloudflared tunnel --url http://localhost:8000  (or ngrok http 8000)
 """
 

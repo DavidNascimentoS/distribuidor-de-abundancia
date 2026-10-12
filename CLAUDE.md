@@ -2,8 +2,9 @@
 
 Social project (non-profit): a WhatsApp agent that connects people who can donate food
 with people who need it, in Várzea Paulista/Jundiaí (SP, Brazil). Also a public portfolio
-piece — code, README and ADRs are written in English; user-facing messages are in
-Brazilian Portuguese.
+piece. Code, identifiers and commit messages are in English. README.md and ADRs are in
+Brazilian Portuguese, with an English README.en.md kept in sync. User-facing messages are
+in Brazilian Portuguese.
 
 ## Three entry doors
 1. "Quero ajudar" — donor registers what, how much, expiry, neighborhood, pickup/delivery.
