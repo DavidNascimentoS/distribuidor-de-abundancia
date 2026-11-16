@@ -13,7 +13,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",
-    "psycopg[binary]>=3.2",
+    "psycopg[binary,pool]>=3.2",
     "pydantic-settings>=2.4",
 ]
 
@@ -29,3 +29,10 @@ packages = ["app"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Database tests use DATABASE_URL (default in tests/conftest.py) and skip if it is unreachable.

@@ -47,9 +47,16 @@ matching e confirmam cada entrega.
 ## Estrutura
 
 ```
-app/              aplicação FastAPI (app/main.py = webhook)
+app/main.py       webhook FastAPI: assinatura, dedup, despacho em background, envio
+app/flow.py       máquina de estados da conversa (funções puras, sem I/O)
+app/repository.py acesso ao banco: dedup, participantes, estado da conversa
+app/pii.py        hash do telefone (HMAC); a criptografia ainda vem
+app/config.py     settings via variáveis de ambiente (pydantic-settings)
+app/db.py         pool de conexões (psycopg)
+app/loop.py       fábrica de event loop Selector pra dev no Windows
 db/migrations/    schema SQL (Postgres + PostGIS)
 db/tests/         testes SQL do schema
+tests/            testes pytest do app
 docs/adr/         registros de decisões de arquitetura
 ```
 
@@ -67,16 +74,17 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 # 2. Variáveis de ambiente
-cp .env.example .env             # preencha os valores WA_*
+cp .env.example .env             # preencha os valores WA_* e gere o PII_HMAC_KEY
 
-# 3. Banco (opcional por enquanto: o webhook ainda não usa o banco)
+# 3. Banco (porta 5433 no host, pra não brigar com um Postgres já instalado)
 docker run -d --name abundancia-db -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=abundancia -p 5432:5432 postgis/postgis:16-3.4
-psql "postgresql://postgres:postgres@localhost:5432/abundancia" \
+  -e POSTGRES_DB=abundancia -p 5433:5432 postgis/postgis:16-3.4
+# espere a imagem terminar o init (uns 30 s na primeira vez) antes de aplicar o schema
+psql "postgresql://postgres:postgres@localhost:5433/abundancia" \
   -f db/migrations/001_initial.sql
 
 # 4. Servidor
-uvicorn app.main:app --reload --port 8000 --env-file .env
+uvicorn app.main:app --reload --port 8000
 
 # 5. HTTPS público pra Meta alcançar o webhook
 cloudflared tunnel --url http://localhost:8000   # ou: ngrok http 8000
@@ -91,24 +99,41 @@ python -m venv .venv
 pip install -e ".[dev]"
 
 # 2. Variáveis de ambiente
-Copy-Item .env.example .env      # preencha os valores WA_*
+Copy-Item .env.example .env      # preencha os valores WA_* e gere o PII_HMAC_KEY
 
-# 3. Banco (opcional por enquanto: o webhook ainda não usa o banco)
+# 3. Banco (porta 5433 no host, pra não brigar com um Postgres já instalado)
 docker run -d --name abundancia-db -e POSTGRES_PASSWORD=postgres `
-  -e POSTGRES_DB=abundancia -p 5432:5432 postgis/postgis:16-3.4
+  -e POSTGRES_DB=abundancia -p 5433:5432 postgis/postgis:16-3.4
+# espere a imagem terminar o init (uns 30 s na primeira vez) antes de aplicar o schema
 Get-Content db\migrations\001_initial.sql | docker exec -i abundancia-db `
   psql -U postgres -d abundancia -v ON_ERROR_STOP=1
 
 # 4. Servidor
-uvicorn app.main:app --reload --port 8000 --env-file .env
+uvicorn app.main:app --reload --port 8000
+# sem --reload no Windows, acrescente: --loop app.loop:selector_loop  (veja app/loop.py)
 
 # 5. HTTPS público pra Meta alcançar o webhook
 cloudflared tunnel --url http://localhost:8000   # ou: ngrok http 8000
 ```
 
 No PowerShell, a migration roda pelo `psql` de dentro do container, então você não precisa
-instalar o cliente do Postgres no Windows. O `--env-file` do uvicorn usa o `python-dotenv`,
-que já vem com o `uvicorn[standard]`.
+instalar o cliente do Postgres no Windows. O app lê o `.env` sozinho (pydantic-settings). No
+Windows, o psycopg assíncrono não roda no event loop padrão (Proactor); com `--reload` o
+uvicorn já usa o loop certo, e sem `--reload` é preciso passar `--loop app.loop:selector_loop`.
+
+Atenção ao init da imagem `postgis/postgis`: na primeira subida ela inicia o Postgres só no
+socket interno, roda os scripts do PostGIS e reinicia. Se a migration rodar nessa janela, o
+script do PostGIS falha e o container morre. Espere a porta 5433 aceitar conexão do host.
+
+### Testes do app
+
+```bash
+pytest
+```
+
+Os testes de `app/flow.py`, `app/pii.py` e do webhook rodam sem banco. Os de
+`app/repository.py` usam o `DATABASE_URL` (padrão: o Docker acima) numa transação com
+rollback, e são pulados se o banco não estiver acessível ou sem o schema aplicado.
 
 ### Testes do schema
 
@@ -119,7 +144,7 @@ no banco. Na primeira regra quebrada, o psql para com código de saída diferent
 Rode depois de aplicar a migration:
 
 ```bash
-psql "postgresql://postgres:postgres@localhost:5432/abundancia" \
+psql "postgresql://postgres:postgres@localhost:5433/abundancia" \
   -v ON_ERROR_STOP=1 -f db/tests/001_schema_test.sql
 ```
 
@@ -140,10 +165,15 @@ Por último, no painel da Meta (WhatsApp > Configuration), cadastre a URL
 MVP em construção.
 
 **Já existe**
-- Webhook: valida a assinatura da Meta, deduplica mensagens (em memória) e mostra o menu das
-  três portas.
-- Schema do banco ([`001_initial.sql`](db/migrations/001_initial.sql)): o webhook ainda não
-  usa esse schema. O banco já impõe:
+- Webhook: valida a assinatura da Meta, responde 200 na hora e processa cada mensagem em
+  background.
+- Persistência no Postgres: dedup por `wamid` em `inbound_messages`, participante encontrado
+  pelo HMAC do telefone (sem guardar o número) e estado da conversa em `conversations`,
+  tudo numa transação por mensagem.
+- Máquina de estados ([`app/flow.py`](app/flow.py)): menu das três portas, primeira pergunta
+  de cada porta, localização nativa arredondada a ~100 m e a palavra *menu* pra recomeçar.
+  Texto livre no meio do fluxo ainda só é reconhecido, não interpretado.
+- Schema do banco ([`001_initial.sql`](db/migrations/001_initial.sql)). O banco já impõe:
   - pedido aprovado, rejeitado ou atendido precisa ter um anjo e uma data de validação;
   - só pedido aprovado pode receber match (trigger em `matches`);
   - entrega confirmada precisa ter um anjo e uma data de confirmação;
@@ -151,13 +181,17 @@ MVP em construção.
   - número de crianças não pode passar do tamanho da família.
 
 **Planejado**
+- **Fluxo completo de cada porta:** hoje a conversa para na primeira pergunta. Faltam os
+  passos seguintes, com botões sempre que possível, e a extração de campos com o LLM onde o
+  texto livre é inevitável.
 - **Criptografia da PII:** a tabela `person_pii` só tem colunas `bytea` pra guardar dados
   cifrados. Quem vai cifrar é o app, com chave vinda de variável de ambiente, e isso ainda
-  não foi implementado. O banco não criptografa nada sozinho.
+  não foi implementado. O banco não criptografa nada sozinho. Por ora só o `phone_hash` é
+  gravado. Ponto em aberto: após o apagamento LGPD (`deleted_at`), o `phone_hash` único
+  ainda impede o mesmo telefone de se cadastrar de novo.
 - **Regras dos anjos:** o banco ainda não confere se o anjo está ativo nem se ele é do mesmo
   bairro do pedido.
-- Persistir o estado da conversa e a deduplicação no Postgres, extrair campos com o LLM,
-  fazer o matching em SQL e montar o fluxo dos anjos no WhatsApp.
+- Matching em SQL, fluxo dos anjos no WhatsApp, Langfuse, deploy.
 
 As decisões de arquitetura ficam em [`docs/adr/`](docs/adr/).
 
